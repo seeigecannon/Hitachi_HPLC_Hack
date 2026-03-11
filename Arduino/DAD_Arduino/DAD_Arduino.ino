@@ -2,6 +2,7 @@
 #include <TimerOne.h>
 #include <AccelStepper.h>
 
+///DAD stuff///
 #define DAC_Ready_Pin 21
 #define hplcDigA 20
 #define hplcDigB 19
@@ -9,37 +10,48 @@
 #define newlinePin 20
 #define bufferSize 1200 //1800
 #define pixelsToSkip 0
-
 byte DADBuffer0[bufferSize];
 byte DADBuffer1[bufferSize];
-//byte DADBuffer2[bufferSize];
 int skipPixelCounter=0;
 int DADBufPos=0;
 volatile byte useBufferNum = 0;
 bool okToTransmit = false;
 unsigned long int DADTimeStamp=0;
 
-int inputStatusTest=0;
 
-byte count=0;
-
+/// intradevice comms stuff///
 const unsigned long TIMEOUT_MS = 3;  // Timeout for reading a packet
 const size_t MAX_PACKET_SIZE =30;     // Maximum packet size (adjust as needed)
 bool isMaster = 0;  //if true the arduino will acknologe packets and transmit to HPLC devices
 bool previousPumpPinState = PINE & _BV(PINE5);
 bool previousASPinState = PING & _BV(PING5);
 
-//motion control stuff
-const int pulsePin = 2;    // Step pin
-const int dirPin = 5;      // Direction pin
-const int homeSensorPin = 7; // Optical homing sensor pin (active low)
-AccelStepper myStepper(AccelStepper::DRIVER, pulsePin, dirPin);  // Use DRIVER mode (pulse/direction)
+
+///motion control stuff///
+const int wheelPulsePin = 2;    // Step pin
+const int wheelDirPin = 5;      // Direction pin
+const int mirrorPulsePin = 3;    // Step pin
+const int mirrorDirPin = 6;      // Direction pin
+const int lampPulsePin = 4;    // Step pin
+const int lampDirPin = 7;      // Direction pin
+const int homeSensorPin = A8; // Optical homing sensor pin (active low)
+AccelStepper wheelStepper(AccelStepper::DRIVER, wheelPulsePin, wheelDirPin);  // Use DRIVER mode (pulse/direction)
+AccelStepper mirrorStepper(AccelStepper::DRIVER, mirrorPulsePin, mirrorDirPin);  // Use DRIVER mode (pulse/direction)
+//AccelStepper mercuryLamp(AccelStepper::DRIVER, mirrorPulsePin, mirrorDirPin);  // Use DRIVER mode (pulse/direction)
 #define motorEnPin 8
-float targetAngle = 90.0;  // Desired angle in degrees (or any unit for your system)
-float currentAngle = 0.0;  // Current angle, initially at 0
-// Motor steps per degree (this depends on your motor's configuration)
-const float stepsPerDegree = 100.0;  // Adjust to your motor's specifics
-volatile bool homingComplete = false;  // Flag to indicate homing status
+#define motorsOn LOW
+#define motorsOff HIGH
+
+//lamp stuff///
+#define mercuryLampEn 12
+#define lampOnPin A9
+#define lampStrikePin A10
+#define lampStatusPin A11
+unsigned long int lampTimer=0;
+#define lampWarmupTime 20000
+bool currentLampState=false;
+bool turnLampOn=false;
+
 
 
 
@@ -47,20 +59,18 @@ volatile bool homingComplete = false;  // Flag to indicate homing status
 
 
 void setup() {
-  
+  wdt_disable();
 
-  Serial.begin(460800);
-
+  //Serial.begin(460800);
+  Serial.begin(115200);
   Serial2.begin(19200);
 
   clearSerialBuffer();
   clearSerial1Buffer();
   
-  DDRA = 0xFF;
-  DDRC = 0xFF;
-
-
-  DDRL = 0x00;  //PORTC and PORTL as inputs
+  DDRA = 0xFF;  //PORT A, L, C, and D as inputs
+  //DDRC = 0xFF;
+  DDRL = 0x00;  
   DDRC = 0x00;
   DDRD = 0x00;
 
@@ -69,20 +79,73 @@ void setup() {
   //attachInterrupt(digitalPinToInterrupt(DAC_Ready_Pin), DAC_Ready, RISING);
   //attachInterrupt(digitalPinToInterrupt(newlinePin), DAD_NewLine, FALLING);
 
+  Serial.println("booting");
+  
+  //init lamp pins to HIGH-Z to make sure lamp is off
+  pinMode(lampOnPin, INPUT);  //make sure lamp is off
+  pinMode(lampStrikePin, INPUT);  //make sure lamp is off
+  pinMode(lampStatusPin, INPUT_PULLUP);
 
+  /*while(1){ //lamp test
+    Serial.println(lampControl(true));
+    delay(1000);
+  }*/
+
+
+
+  pinMode(motorEnPin, OUTPUT);
+  digitalWrite(motorEnPin, motorsOn);
+  pinMode(mercuryLampEn, OUTPUT);
+  digitalWrite(mercuryLampEn, motorsOff);
   //motion control stuff
-  myStepper.setMaxSpeed(1000);  // Max speed
-  myStepper.setAcceleration(500);  // Acceleration
+  //wheelStepper.setMaxSpeed(100);  // Max speed
+  //wheelStepper.setAcceleration(50);  // Acceleration
   pinMode(homeSensorPin, INPUT_PULLUP);  // Assume sensor is active low
   Timer1.initialize(1000);  // 1000 microseconds = 1ms, adjust for the desired frequency
   Timer1.attachInterrupt(runStepper);  // Calls runStepper() every time interrupt triggers
   // Home the motor (set current position to 0)
-  homeMotor();
+  int lampPos=0;
+  /*while(1){
+    lampPos++;
+    Serial.println(lampPos);
+    mercuryLamp.moveTo(lampPos);
+    mercuryLamp.runToPosition();
+    delay(1000);
+  mercuryLamp.runToPosition();
+  }
+  mercuryLamp.move(-2);
+  mercuryLamp.runToPosition();
+  */
+  //homeMirror();
+  //homeWheel();
 
   wdt_enable(WDTO_1S);    //enable use of WDT
 }
 
+bool lampControl(bool lampPower){   //this function, if the input is HIGH, sets the pins going to the lamp PSU to outputs, then does a cycle to turn the lamp on
+  if(lampPower){  //run steps if lamp should be turning on
+    pinMode(lampOnPin, OUTPUT);
+    pinMode(lampStrikePin, OUTPUT);
+    if(lampTimer==0){   //check to see if lamp is already on/starting
+      lampTimer=millis();
+    }
+    
+    if(lampTimer+millis()>lampWarmupTime){  //wait an amount of time for the lamp to warm up
+      digitalWrite(lampStrikePin, LOW);   //lamp strikes when this is falling
+    }
+    else{
+      digitalWrite(lampOnPin, LOW);   //lamp is active LOW
+      digitalWrite(lampStrikePin, HIGH);  //strike idles HIGH
+    }
+  }
+  else{
+    lampTimer=0;
+    pinMode(lampOnPin, INPUT);  //switch to high impedance
+    pinMode(lampStrikePin, INPUT);  //switch to high impedance
+  }
+  return !digitalRead(lampStatusPin); //return lamp status. Input pin is LOW when lamp is running
 
+}
   
 
 
@@ -90,22 +153,26 @@ void setup() {
 
 
 void loop() {
-  float targetPosition = targetAngle * stepsPerDegree;
+  //float targetPosition = targetAngle * stepsPerDegree;
 
   // Move the motor to the target position
-  myStepper.moveTo(targetPosition);
+  wheelStepper.moveTo(2400);
 
   // Optionally: Check and print current position
-  Serial.print("Current Position (steps): ");
-  Serial.println(myStepper.currentPosition());
+  //Serial.print("Current Position (steps): ");
+  //Serial.println(wheelStepper.currentPosition());
 
   // Monitor motor state: If the motor has reached its target, disable the interrupt
-  if (myStepper.distanceToGo() == 0) {
+  if (wheelStepper.distanceToGo() == 0||mirrorStepper.distanceToGo() == 0) {
+    
     // Motor has reached its target, disable the timer interrupt
+    digitalWrite(motorEnPin, motorsOff);
     Timer1.detachInterrupt();
-    Serial.println("Motor is in position, interrupt disabled.");
+    //Serial.println("Motor is in position, interrupt disabled.");
   }
   else{
+    //Serial.println(wheelStepper.distanceToGo());
+    digitalWrite(motorEnPin, motorsOff);
     Timer1.attachInterrupt(runStepper);
   }
 
@@ -117,7 +184,7 @@ void loop() {
   if(DADBuffer0[bufferSize-5]){
     sendBuffer(DADBuffer0);
   }
-
+  currentLampState=lampControl(turnLampOn);
 
     
 
@@ -133,37 +200,64 @@ void loop() {
 }
 
 void runStepper() {
-  myStepper.run();  // Call run() to move the motor step by step
-
+  wheelStepper.run();  // Call run() to move the motor step by step
+  mirrorStepper.run();
   // If the motor has finished its move, stop the interrupt
-  if (myStepper.distanceToGo() == 0) {
+  /*if (wheelStepper.distanceToGo() == 0) {
     Timer1.detachInterrupt();  // Disable the interrupt if the motor is in position
-  }
+  }*/
 }
 
-void homeMotor() {
+void homeMirror(){
+  mirrorStepper.setMaxSpeed(10);  // Slow speed for homing
+  mirrorStepper.setAcceleration(10);
+  mirrorStepper.move(-10);
+
+  /*while(mirrorStepper.distanceToGo() != 0) {
+    mirrorStepper.run();
+  }*/
+  mirrorStepper.runToPosition();
+  mirrorStepper.setCurrentPosition(0);
+  mirrorStepper.moveTo(10);
+  mirrorStepper.runToPosition();
+  delay(1000);
+  mirrorStepper.moveTo(0);
+  mirrorStepper.runToPosition();
+  
+}
+
+void homeWheel() {
   // Move motor in one direction until home sensor is triggered
-  Serial.println("Homing motor...");
-
-  myStepper.setMaxSpeed(200);  // Slow speed for homing
-  myStepper.setAcceleration(100);  // Low acceleration for homing
-
+  //Serial.println("Homing motor...");
+  //Serial.println("home stage 0");
+  wheelStepper.setMaxSpeed(300);  // fast speed for finding notch
+  wheelStepper.setAcceleration(500);  // Low acceleration for homing
+  
+  //wait for the homeSensorPin to go LOW to indicate the sensor is in the home notch
   while (digitalRead(homeSensorPin) == HIGH) {  // Active LOW, so HIGH means not yet triggered
-    myStepper.moveTo(10000);  
-    myStepper.run();
+    wheelStepper.moveTo(10000);  
+    wheelStepper.run();
   }
 
-  // Sensor triggered, motor is homed
-  Serial.println("Homing complete!");
-  myStepper.setCurrentPosition(0);  // Set current position to 0
+  wheelStepper.setMaxSpeed(50);  // Slow speed for homing
+  //Serial.println("home stage 1");
+  while (digitalRead(homeSensorPin) == LOW) {  // wait for sensor to read HIGH again
+    wheelStepper.moveTo(10000);  
+    wheelStepper.run();
+  }
 
-  // Optionally, reset the motor speed and acceleration
-  myStepper.setMaxSpeed(1000);
-  myStepper.setAcceleration(500);
+  wheelStepper.stop();  //stop motion
+  // Sensor triggered, motor is homed
+  //Serial.println("Homing complete!");
+  wheelStepper.setCurrentPosition(0);  // Set current position to 0
+
+  // reset the motor speed and acceleration
+  wheelStepper.setMaxSpeed(300);
+  wheelStepper.setAcceleration(500);
 }
 
 
-void sendBuffer(byte buffer[]){
+void sendBuffer(byte buffer[]){   //send the current buffer, encapsulate with a "PKTDAD:" and "**-" """todo add status packet here as well for motor statuses and current oven temperature"""
   Serial.print("PKTDAD:");
   for(unsigned int i=0; i<bufferSize; i++){
     Serial.write(buffer[i]);
@@ -180,24 +274,23 @@ void sendBuffer(byte buffer[]){
 
 
 void DAC_Ready(){
-  noInterrupts();
+  noInterrupts(); //ensure step motors can't interfere with reading data
+  //read bytes into RAM
   byte highByte = PINL ^=0b10000000;  //signal is aliesing, invert first bit to help somehow
-
   byte lowByte = PINC;
 
-  if(skipPixelCounter<pixelsToSkip){
+  /*if(skipPixelCounter<pixelsToSkip){  //skip the blank pixels at the start
     skipPixelCounter++;
     interrupts();
     return;
-  }
+  }*/
 
 
-  if(DADBufPos>bufferSize-7){
-
+  if(DADBufPos>bufferSize-7){ //checl to see if the buffer is full, if it is,just write everything to the same place instead of going outside of array
     DADBufPos=300;
   }
 
-  switch(useBufferNum){
+  switch(useBufferNum){ //write to the buffer that is not currently transmitting
     case 0:
       PORTA = PORTA | 10100000;   //27 write buffer 0
       DADBuffer0[DADBufPos]=highByte;
@@ -223,10 +316,10 @@ void DAC_Ready(){
 }
 void DAD_NewLine(){
   //Serial.println("new line");
-  noInterrupts();
-  DADBufPos = 0;
-  skipPixelCounter=0;
-  unsigned long currentTime = millis();
+  noInterrupts(); //make sure step motors cant interfere
+  DADBufPos = 0;  //reset DAD data array position used in the DAC_Ready() function
+  //skipPixelCounter=0;
+  unsigned long currentTime = millis(); //get current timestamp
 
   useBufferNum++;
   if(useBufferNum==2){
@@ -238,9 +331,9 @@ void DAD_NewLine(){
     case 0:
 
       //Serial.print("initA");
-      DADBuffer1[bufferSize-5]=0x30;
-      DADBuffer0[bufferSize-6]=PIND;
-      DADBuffer0[bufferSize-4]=(currentTime >> 24) & 0xFF;
+      DADBuffer1[bufferSize-5]=0x30;  //ASCII 0 indicates that buffer 0 is being sent to PC, this also indicates buffer 1 is ready to send
+      DADBuffer0[bufferSize-6]=PIND;  //general status
+      DADBuffer0[bufferSize-4]=(currentTime >> 24) & 0xFF;  //next few lines loads the timestamp
       DADBuffer0[bufferSize-3]=(currentTime >> 16) & 0xFF;
       DADBuffer0[bufferSize-2]=(currentTime >> 8) & 0xFF;
       DADBuffer0[bufferSize-1]=(currentTime) & 0xFF;
@@ -248,7 +341,8 @@ void DAD_NewLine(){
     case 1:
 
       //Serial.print("initB");
-      DADBuffer0[bufferSize-5]=0x31;
+      DADBuffer0[bufferSize-5]=0x31;  //ASCII 1 indicates that buffer 1 is being sent to PC, this also indicates buffer 0 is ready to send
+      DADBuffer1[bufferSize-6]=PIND;
       DADBuffer1[bufferSize-4]=(currentTime >> 24) & 0xFF;
       DADBuffer1[bufferSize-3]=(currentTime >> 16) & 0xFF;
       DADBuffer1[bufferSize-2]=(currentTime >> 8) & 0xFF;
@@ -257,7 +351,7 @@ void DAD_NewLine(){
 
   }
 
-  okToTransmit = true;
+  //okToTransmit = true;
   interrupts();
 }
 
